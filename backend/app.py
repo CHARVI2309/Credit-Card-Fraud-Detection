@@ -1,8 +1,35 @@
+
+import os
+import joblib
+import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.abspath(
+    os.path.join(BASE_DIR, "..", "model", "best_model.pkl")
+)
+
+model = joblib.load(MODEL_PATH)
+
+FEATURES = [
+    "amount",
+    "transaction_hour",
+    "foreign_transaction",
+    "location_mismatch",
+    "device_trust_score",
+    "velocity_last_24h",
+    "cardholder_age",
+    "merchant_category_Electronics",
+    "merchant_category_Food",
+    "merchant_category_Grocery",
+    "merchant_category_Travel"
+]
+
+CATEGORIES = ["Electronics", "Food", "Grocery", "Travel"]
 
 
 @app.route("/")
@@ -15,28 +42,29 @@ def home():
 @app.route("/health")
 def health():
     return jsonify({
-        "status": "healthy"
+        "status": "healthy",
+        "model_loaded": model is not None
     })
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.get_json()
+    data = request.get_json(silent=True)
 
-    if not data:
+    if not isinstance(data, dict):
         return jsonify({
-            "error": "No transaction data provided"
+            "error": "Send transaction data as JSON"
         }), 400
 
     required_fields = [
         "amount",
         "transaction_hour",
-        "merchant_category",
         "foreign_transaction",
         "location_mismatch",
         "device_trust_score",
         "velocity_last_24h",
-        "cardholder_age"
+        "cardholder_age",
+        "merchant_category"
     ]
 
     missing_fields = [
@@ -50,10 +78,48 @@ def predict():
             "missing_fields": missing_fields
         }), 400
 
-    return jsonify({
-        "message": "Prediction endpoint is ready",
-        "received_data": data
-    })
+    if data["merchant_category"] not in CATEGORIES:
+        return jsonify({
+            "error": "Invalid merchant_category",
+            "allowed_values": CATEGORIES
+        }), 400
+
+    try:
+        row = {
+            "amount": float(data["amount"]),
+            "transaction_hour": float(data["transaction_hour"]),
+            "foreign_transaction": float(data["foreign_transaction"]),
+            "location_mismatch": float(data["location_mismatch"]),
+            "device_trust_score": float(data["device_trust_score"]),
+            "velocity_last_24h": float(data["velocity_last_24h"]),
+            "cardholder_age": float(data["cardholder_age"])
+        }
+
+        for category in CATEGORIES:
+            row[f"merchant_category_{category}"] = int(
+                data["merchant_category"] == category
+            )
+
+        input_data = pd.DataFrame([row], columns=FEATURES)
+
+        prediction = int(model.predict(input_data)[0])
+
+        result = {
+            "is_fraud": prediction,
+            "status": "Fraudulent" if prediction == 1 else "Legitimate"
+        }
+
+        if hasattr(model, "predict_proba"):
+            result["fraud_probability"] = round(
+                float(model.predict_proba(input_data)[0][1]), 4
+            )
+
+        return jsonify(result)
+
+    except (TypeError, ValueError):
+        return jsonify({
+            "error": "Feature values must be valid numbers"
+        }), 400
 
 
 if __name__ == "__main__":
