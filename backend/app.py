@@ -1,5 +1,5 @@
-
 import os
+import math
 import joblib
 import pandas as pd
 from flask import Flask, jsonify, request
@@ -84,24 +84,86 @@ def predict():
             "allowed_values": CATEGORIES
         }), 400
 
+    numeric_fields = [
+        "amount",
+        "transaction_hour",
+        "foreign_transaction",
+        "location_mismatch",
+        "device_trust_score",
+        "velocity_last_24h",
+        "cardholder_age"
+    ]
+
+    values = {}
+
+    for field in numeric_fields:
+        value = data[field]
+
+        if isinstance(value, bool) or value is None:
+            return jsonify({
+                "error": f"{field} must be a valid number"
+            }), 400
+
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return jsonify({
+                "error": f"{field} must be a valid number"
+            }), 400
+
+        if not math.isfinite(value):
+            return jsonify({
+                "error": f"{field} must be finite"
+            }), 400
+
+        values[field] = value
+
+    if values["amount"] < 0:
+        return jsonify({"error": "Amount cannot be negative"}), 400
+
+    hour = values["transaction_hour"]
+    if not hour.is_integer() or not 0 <= hour <= 23:
+        return jsonify({
+            "error": "Transaction hour must be an integer from 0 to 23"
+        }), 400
+
+    for field in ["foreign_transaction", "location_mismatch"]:
+        if values[field] not in (0, 1):
+            return jsonify({
+                "error": f"{field} must be 0 or 1"
+            }), 400
+
+    score = values["device_trust_score"]
+    if not 0 <= score <= 1:
+        return jsonify({
+            "error": "Device trust score must be between 0 and 1"
+        }), 400
+
+    velocity = values["velocity_last_24h"]
+    if velocity < 0 or not velocity.is_integer():
+        return jsonify({
+            "error": "Velocity must be a non-negative integer"
+        }), 400
+
+    age = values["cardholder_age"]
+    if not age.is_integer() or not 0 <= age <= 120:
+        return jsonify({
+            "error": "Cardholder age must be an integer from 0 to 120"
+        }), 400
+
+    row = {
+        field: values[field]
+        for field in numeric_fields
+    }
+
+    for category in CATEGORIES:
+        row[f"merchant_category_{category}"] = int(
+            data["merchant_category"] == category
+        )
+
+    input_data = pd.DataFrame([row], columns=FEATURES)
+
     try:
-        row = {
-            "amount": float(data["amount"]),
-            "transaction_hour": float(data["transaction_hour"]),
-            "foreign_transaction": float(data["foreign_transaction"]),
-            "location_mismatch": float(data["location_mismatch"]),
-            "device_trust_score": float(data["device_trust_score"]),
-            "velocity_last_24h": float(data["velocity_last_24h"]),
-            "cardholder_age": float(data["cardholder_age"])
-        }
-
-        for category in CATEGORIES:
-            row[f"merchant_category_{category}"] = int(
-                data["merchant_category"] == category
-            )
-
-        input_data = pd.DataFrame([row], columns=FEATURES)
-
         prediction = int(model.predict(input_data)[0])
 
         result = {
@@ -110,17 +172,22 @@ def predict():
         }
 
         if hasattr(model, "predict_proba"):
-            result["fraud_probability"] = round(
-                float(model.predict_proba(input_data)[0][1]), 4
-            )
+            probabilities = model.predict_proba(input_data)[0]
+            classes = list(model.classes_)
+
+            if 1 in classes:
+                result["fraud_probability"] = round(
+                    float(probabilities[classes.index(1)]), 4
+                )
 
         return jsonify(result)
 
-    except (TypeError, ValueError):
+    except Exception:
+        app.logger.exception("Fraud prediction failed")
         return jsonify({
-            "error": "Feature values must be valid numbers"
-        }), 400
+            "error": "Prediction failed"
+        }), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=os.getenv("FLASK_DEBUG") == "1")
