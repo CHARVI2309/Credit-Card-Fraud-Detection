@@ -1,9 +1,15 @@
+
 import os
 import math
+import json
 import joblib
 import pandas as pd
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from cryptography.fernet import InvalidToken
+
+from security_utils import decrypt_data
 
 app = Flask(__name__)
 CORS(app)
@@ -47,10 +53,7 @@ def health():
     })
 
 
-@app.route("/predict", methods=["POST"])
-def predict():
-    data = request.get_json(silent=True)
-
+def predict_transaction(data):
     if not isinstance(data, dict):
         return jsonify({
             "error": "Send transaction data as JSON"
@@ -78,7 +81,10 @@ def predict():
             "missing_fields": missing_fields
         }), 400
 
-    if data["merchant_category"] not in CATEGORIES:
+    if (
+        not isinstance(data["merchant_category"], str)
+        or data["merchant_category"] not in CATEGORIES
+    ):
         return jsonify({
             "error": "Invalid merchant_category",
             "allowed_values": CATEGORIES
@@ -119,7 +125,9 @@ def predict():
         values[field] = value
 
     if values["amount"] < 0:
-        return jsonify({"error": "Amount cannot be negative"}), 400
+        return jsonify({
+            "error": "Amount cannot be negative"
+        }), 400
 
     hour = values["transaction_hour"]
     if not hour.is_integer() or not 0 <= hour <= 23:
@@ -168,7 +176,9 @@ def predict():
 
         result = {
             "is_fraud": prediction,
-            "status": "Fraudulent" if prediction == 1 else "Legitimate"
+            "status": (
+                "Fraudulent" if prediction == 1 else "Legitimate"
+            )
         }
 
         if hasattr(model, "predict_proba"):
@@ -180,13 +190,65 @@ def predict():
                     float(probabilities[classes.index(1)]), 4
                 )
 
-        return jsonify(result)
+        return jsonify(result), 200
 
     except Exception:
         app.logger.exception("Fraud prediction failed")
         return jsonify({
             "error": "Prediction failed"
         }), 500
+
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    data = request.get_json(silent=True)
+    return predict_transaction(data)
+
+
+@app.route("/predict-encrypted", methods=["POST"])
+def predict_encrypted():
+    data = request.get_json(silent=True)
+
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("encrypted_data"), str)
+    ):
+        return jsonify({
+            "error": "Send encrypted_data as a string in JSON"
+        }), 400
+
+    try:
+        encrypted_bytes = data["encrypted_data"].encode("utf-8")
+        decrypted_bytes = decrypt_data(encrypted_bytes)
+        transaction_data = json.loads(
+            decrypted_bytes.decode("utf-8")
+        )
+
+        if not isinstance(transaction_data, dict):
+            return jsonify({
+                "error": "Decrypted data must be a JSON object"
+            }), 400
+
+    except RuntimeError:
+        app.logger.exception("Encryption key is not configured")
+        return jsonify({
+            "error": "Encryption is not configured on the server"
+        }), 500
+
+    except (InvalidToken, ValueError, UnicodeDecodeError,
+            json.JSONDecodeError):
+        app.logger.exception("Encrypted API decryption/parsing failed")
+        return jsonify({
+            "error": "Invalid encrypted data or JSON"
+        }), 400
+
+    except Exception:
+        app.logger.exception("Unexpected encrypted API error")
+        return jsonify({
+            "error": "Encrypted request processing failed"
+        }), 500
+
+    return predict_transaction(transaction_data)
 
 
 if __name__ == "__main__":
