@@ -8,7 +8,8 @@ import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from cryptography.fernet import InvalidToken
-
+from dotenv import load_dotenv
+load_dotenv()
 from security_utils import decrypt_data
 
 app = Flask(__name__)
@@ -253,3 +254,6 @@ def predict_encrypted():
 
 if __name__ == "__main__":
     app.run(debug=os.getenv("FLASK_DEBUG") == "1")
+
+from dotenv import load_dotenv
+load_dotenv()
